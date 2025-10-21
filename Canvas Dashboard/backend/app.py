@@ -1,70 +1,101 @@
-# backend/app.py
+# app.py
 from flask import Flask, jsonify, request
 import requests
-import os
 from datetime import datetime, timedelta
+from flask_cors import CORS
+import os
 
 app = Flask(__name__)
+CORS(app)
 
-CANVAS_API_URL = os.getenv("CANVAS_API_URL")
-API_KEY = os.getenv("CANVAS_API_KEY")
-HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+CANVAS_API_URL = os.getenv("CANVAS_API_URL")  # e.g. https://your-school.instructure.com/api/v1
+CANVAS_API_KEY = os.getenv("CANVAS_API_KEY")
+HEADERS = {"Authorization": f"Bearer {CANVAS_API_KEY}"}
+
+# Fetch all courses for the user
+def get_courses():
+    r = requests.get(f"{CANVAS_API_URL}/courses", headers=HEADERS)
+    if r.status_code != 200:
+        return []
+    return r.json()
+
+# Fetch assignments for a specific course
+def get_assignments(course_id):
+    r = requests.get(f"{CANVAS_API_URL}/courses/{course_id}/assignments", headers=HEADERS)
+    if r.status_code != 200:
+        return []
+    return r.json()
+
+# Filter assignments due in the next 7 days
+def filter_upcoming_assignments(assignments):
+    now = datetime.now()
+    upcoming = []
+    for a in assignments:
+        if a.get("due_at"):
+            due_date = datetime.fromisoformat(a["due_at"].replace("Z", "+00:00"))
+            if now <= due_date <= now + timedelta(days=7):
+                upcoming.append({
+                    "name": a["name"],
+                    "course_id": a["course_id"],
+                    "due_at": a["due_at"]
+                })
+    return upcoming
+
+# Calculate GPA (dummy example: real logic depends on Canvas data)
+def calculate_gpa(courses, quarter="All"):
+    grades = []
+    for c in courses:
+        if quarter != "All" and c.get("enrollment_term_name") != quarter:
+            continue
+        grade = c.get("enrollment_term_grade")
+        if grade:
+            try:
+                grades.append(float(grade))
+            except:
+                pass
+    return round(sum(grades) / len(grades), 2) if grades else None
+
+# Get all terms/quarters
+def get_quarters():
+    r = requests.get(f"{CANVAS_API_URL}/accounts/1/terms", headers=HEADERS)
+    if r.status_code != 200:
+        return ["All"]
+    terms = r.json()
+    quarters = ["All"]
+    for t in terms:
+        quarters.append(t.get("name"))
+    return quarters
 
 @app.route("/courses")
-def get_courses():
-    """Return all courses from Canvas"""
-    r = requests.get(f"{CANVAS_API_URL}/courses", headers=HEADERS)
-    courses = r.json()
-    return jsonify(courses)
-
-@app.route("/assignments/next_week")
-def get_upcoming_assignments():
-    """Return assignments due in the next 7 days"""
-    r = requests.get(f"{CANVAS_API_URL}/courses", headers=HEADERS)
-    courses = r.json()
-    upcoming = []
-    now = datetime.now()
-    one_week = now + timedelta(days=7)
-
-    for course in courses:
-        course_id = course['id']
-        ar = requests.get(f"{CANVAS_API_URL}/courses/{course_id}/assignments", headers=HEADERS)
-        assignments = ar.json()
-        for a in assignments:
-            due = a.get('due_at')
-            if due:
-                due_date = datetime.fromisoformat(due.replace('Z', '+00:00'))
-                if now <= due_date <= one_week:
-                    upcoming.append({
-                        "course": course['name'],
-                        "name": a['name'],
-                        "due": due_date.isoformat()
-                    })
-    return jsonify(upcoming)
-
-@app.route("/gpa")
-def get_gpa():
-    """Calculate GPA; ?quarter=all or ?quarter=1,2,3,4"""
-    quarter = request.args.get("quarter", "all")
-    r = requests.get(f"{CANVAS_API_URL}/courses", headers=HEADERS)
-    courses = r.json()
-    total_points = 0
-    total_credits = 0
+def courses_endpoint():
+    quarter = request.args.get("quarter", "All")
+    courses = get_courses()
+    gpa = calculate_gpa(courses, quarter)
+    courses_data = []
+    all_assignments = []
 
     for c in courses:
-        grade = c.get("current_grade")
-        credits = c.get("credits", 1)
+        if quarter != "All" and c.get("enrollment_term_name") != quarter:
+            continue
 
-        # Example: grades_by_quarter dict in Canvas API
-        if quarter != "all":
-            grade = c.get("grades_by_quarter", {}).get(quarter, None)
+        assignments = get_assignments(c["id"])
+        upcoming = filter_upcoming_assignments(assignments)
+        all_assignments.extend(upcoming)
 
-        if grade is not None:
-            total_points += float(grade) * credits
-            total_credits += credits
+        courses_data.append({
+            "id": c["id"],
+            "name": c.get("name"),
+            "grade": c.get("enrollment_term_grade"),
+        })
 
-    gpa = round(total_points / total_credits, 2) if total_credits else None
-    return jsonify({"gpa": gpa})
+    quarters = get_quarters()
+
+    return jsonify({
+        "gpa": gpa,
+        "courses": courses_data,
+        "upcoming_assignments": all_assignments,
+        "quarters": quarters
+    })
 
 if __name__ == "__main__":
     app.run(debug=True)
